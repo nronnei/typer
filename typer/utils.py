@@ -5,7 +5,7 @@ from typing import Any, Callable, Dict, List, Tuple, Type, cast, get_type_hints
 
 from typing_extensions import Annotated
 
-from ._typing import get_args, get_origin
+from ._typing import get_args, get_origin, get_type_hints
 from .models import ArgumentInfo, OptionInfo, ParameterInfo, ParamMeta
 
 
@@ -106,6 +106,77 @@ def _split_annotation_from_typer_annotations(
     ]
 
 
+def _expand_unpackable_param(p: inspect.Parameter) -> List[inspect.Parameter]:
+    """Generates a list of inspect.Parameter from a TypedDict with annotations."""
+    pa_args = get_args(p.annotation)
+    pa0_type_hints = get_type_hints(pa_args[0], include_extras=True)
+    print("")
+    print("PARAMETER ANNOTATION STUFF:")
+    print(f"p: {p}")
+    print(f"p.annotation: {p.annotation}")
+    print(f"pa_args: {pa_args}")
+    print(f"pa0_type_hints: {pa0_type_hints}")
+    print("")
+    params = []
+    for name, annotation in pa0_type_hints.items():
+        annotation = copy(annotation)
+        annotation_args = get_args(annotation)
+        ba, [ta] = _split_annotation_from_typer_annotations(annotation)
+        ta = copy(ta)
+        print("")
+        print("PARAMETER ARGS:")
+        print(f"annotation_args: {annotation_args}")
+        print(f"ba: {ba}")
+        print(f"ta: {ta}")
+        print(f"name: {name}")
+        print(f"kind: {inspect.Parameter.KEYWORD_ONLY}")
+        print(f"annotation: {annotation}")
+        print("")
+
+        # We only support optional options in unpackables. By default, assume default is None.
+        def factory():
+            return None
+
+        # If there's a default_factory on the annotation, use that instead.
+        # If we don't do this, the factory-produced value always takes precendent over the flag. Not sure why.
+        if ta.default_factory is not None:
+            factory = ta.default_factory
+            ta.default_factory = None
+        params.append(
+            inspect.Parameter(
+                name,
+                inspect.Parameter.KEYWORD_ONLY,
+                default=factory(),
+                annotation=Annotated[ba, ta],
+            )
+        )
+
+    return params
+
+    # return [
+    #     inspect.Parameter(
+    #         name,
+    #         inspect.Parameter.KEYWORD_ONLY,
+    #         default=getattr(annotation, "default", inspect.Parameter.empty),
+    #         annotation=annotation,
+    #     )
+    #     for name, annotation in get_type_hints(get_args(p.annotation)[0]).items()
+    # ]
+
+
+def _get_params_with_unpackables_expanded(
+    sig: inspect.Signature,
+) -> List[inspect.Parameter]:
+    """If a parameter has a type of Unpack[TypedDict], expand it and add it to the list of func params."""
+    all_params = []
+    for _, param in sig.parameters.items():
+        if get_origin(param.annotation) == Unpack:
+            all_params.extend(_expand_unpackable_param(param))
+        else:
+            all_params.append(param)
+    return all_params
+
+
 def get_params_from_function(func: Callable[..., Any]) -> Dict[str, ParamMeta]:
     if sys.version_info >= (3, 10):
         signature = inspect.signature(func, eval_str=True)
@@ -114,12 +185,23 @@ def get_params_from_function(func: Callable[..., Any]) -> Dict[str, ParamMeta]:
 
     type_hints = get_type_hints(func)
     params = {}
-    for param in signature.parameters.values():
+    for param in _get_params_with_unpackables_expanded(signature):
         annotation, typer_annotations = _split_annotation_from_typer_annotations(
             param.annotation,
         )
         if len(typer_annotations) > 1:
             raise MultipleTyperAnnotationsError(param.name)
+
+        print("")
+        print("PARAMETER PARSED:")
+        print(f"name: {param.name}")
+        print(f"kind: {inspect.Parameter.KEYWORD_ONLY}")
+        print(f"annotation: {param.annotation}")
+        print(f"default: {param.default}")
+        print(f"base_annotation: {annotation}")
+        print(f"typer_annotation: {typer_annotations}")
+        print(f"annotation_args: {get_args(param.annotation)}")
+        print("")
 
         default = param.default
         if typer_annotations:
